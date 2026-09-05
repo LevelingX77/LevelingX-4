@@ -1,4 +1,5 @@
 require("dotenv").config();
+console.log("[BOOT] Starting application");
 
 const os = require("os");
 const fs = require("fs");
@@ -41,9 +42,9 @@ process.on("uncaughtException", (error) => {
 // =====================================================
 // CONFIG (ENVIRONMENT VARIABLES)
 // =====================================================
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
+const TOKEN = process.env.DISCORD_TOKEN?.trim();
+const CLIENT_ID = process.env.CLIENT_ID?.trim();
+const GUILD_ID = process.env.GUILD_ID?.trim();
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DATABASE_PATH || "./data/bot.db";
 
@@ -71,6 +72,7 @@ app.get("/health", (req, res) => {
 
 const server = app.listen(PORT, () => {
     console.log(`🌐 HTTP Server listening on port ${PORT}`);
+    console.log("[BOOT] HTTP server started");
 });
 
 // =====================================================
@@ -87,6 +89,7 @@ const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
 console.log(`💾 เปิดฐานข้อมูล SQLite ที่: ${DB_PATH}`);
+console.log("[BOOT] Database initialized");
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -163,8 +166,16 @@ const evaluateApplication = db.prepare("UPDATE applications SET status = ?, eval
 // DISCORD CLIENT
 // =====================================================
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+    intents: [GatewayIntentBits.Guilds],
     partials: [Partials.Channel]
+});
+
+client.on("error", (error) => {
+    console.error("[DISCORD] Client error:", error?.message || error);
+});
+
+client.on("shardError", (error) => {
+    console.error("[DISCORD] Shard error:", error?.message || error);
 });
 
 // =====================================================
@@ -385,6 +396,7 @@ async function registerCommands() {
 // =====================================================
 client.once("ready", async () => {
     console.log("====================================");
+    console.log(`[DISCORD] Ready as ${client.user.tag}`);
     console.log(`🤖 Bot: ${client.user.tag}`);
     console.log(`🆔 ID: ${client.user.id}`);
     console.log(`💻 Host: ${os.hostname()}`);
@@ -730,4 +742,11 @@ process.on("SIGTERM", () => shutdownGracefully("SIGTERM"));
 // =====================================================
 // LOGIN
 // =====================================================
-client.login(TOKEN);
+console.log("[DISCORD] Starting Discord login...");
+client.login(TOKEN)
+    .then(() => {
+        console.log("[DISCORD] Login successful");
+    })
+    .catch((error) => {
+        console.error("[DISCORD] Login failed:", error?.message || error);
+    });
