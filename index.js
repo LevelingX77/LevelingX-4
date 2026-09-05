@@ -199,6 +199,14 @@ function infoEmbed(title, description) {
     return new EmbedBuilder().setColor(COLORS.MAIN).setTitle(title).setDescription(description).setTimestamp();
 }
 
+// Discord caps a single embed field value at 1024 characters. Modal inputs
+// allow up to 4000, so long answers must be truncated before being placed
+// into an embed field or the send() call throws.
+function truncateForEmbed(text, max = 1024) {
+    if (!text) return text;
+    return text.length > max ? text.slice(0, max - 3) + "..." : text;
+}
+
 // =====================================================
 // COMPONENT BUILDERS (RECRUITMENT)
 // =====================================================
@@ -236,8 +244,8 @@ function createApplicationEmbed(application) {
             { name: "ชื่อ และ อายุ", value: application.name_age || "-", inline: false },
             { name: "ตำแหน่ง", value: application.mbti_position || "-", inline: false },
             { name: "เวลาว่าง", value: application.work_time || "-", inline: false },
-            { name: "ประสบการณ์", value: application.experience || "-", inline: false },
-            { name: "ข้อมูลเพิ่มเติม", value: application.additional_info || "ไม่มีข้อมูลเพิ่มเติม", inline: false },
+            { name: "ประสบการณ์", value: truncateForEmbed(application.experience) || "-", inline: false },
+            { name: "ข้อมูลเพิ่มเติม", value: truncateForEmbed(application.additional_info) || "ไม่มีข้อมูลเพิ่มเติม", inline: false },
             { name: "ผลการประเมิน", value: status, inline: false }
         );
 
@@ -307,9 +315,9 @@ function createSetupModal() {
     return modal;
 }
 
-function createSetupChannelSelect() {
+function createSetupChannelSelect(token) {
     return new ActionRowBuilder().addComponents(
-        new ChannelSelectMenuBuilder().setCustomId("setup_send_channel").setPlaceholder("เลือกห้องที่จะส่ง Embed รับสมัคร").setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(1).setMaxValues(1)
+        new ChannelSelectMenuBuilder().setCustomId(`setup_send_channel_${token}`).setPlaceholder("เลือกห้องที่จะส่ง Embed รับสมัคร").setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(1).setMaxValues(1)
     );
 }
 
@@ -546,7 +554,7 @@ client.on("interactionCreate", async interaction => {
             const data = global.setupCache?.get(token);
             if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup นี้หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
             if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
-            return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "เลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect()] });
+            return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "เลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect(token)] });
         }
 
         if (interaction.isButton() && interaction.customId.startsWith("setup_cancel_")) {
@@ -555,16 +563,13 @@ client.on("interactionCreate", async interaction => {
             return interaction.update({ embeds: [infoEmbed("ยกเลิกแล้ว", "ไม่ได้บันทึก Embed นี้")], components: [] });
         }
 
-        if (interaction.isChannelSelectMenu() && interaction.customId === "setup_send_channel") {
-            let data = null;
-            let token = null;
-            for (const [key, value] of (global.setupCache || new Map())) {
-                if (value.userId === interaction.user.id && value.guildId === interaction.guild.id) {
-                    data = value;
-                    token = key;
-                }
-            }
+        if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("setup_send_channel_")) {
+            const token = interaction.customId.replace("setup_send_channel_", "");
+            const data = global.setupCache?.get(token);
             if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
+            if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) {
+                return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
+            }
 
             const channelId = interaction.values[0];
             const channel = interaction.guild.channels.cache.get(channelId);
