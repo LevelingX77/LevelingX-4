@@ -157,7 +157,7 @@ const insertApplication = db.prepare(`
 `);
 const getApplication = db.prepare("SELECT * FROM applications WHERE id = ?");
 const setApplicationMessage = db.prepare("UPDATE applications SET message_id = ?, channel_id = ? WHERE id = ?");
-const evaluateApplication = db.prepare("UPDATE applications SET status = ?, evaluator_id = ?, evaluator_tag = ?, reason = ?, evaluated_at = ? WHERE id = ?");
+const evaluateApplication = db.prepare("UPDATE applications SET status = ?, evaluator_id = ?, evaluator_tag = ?, reason = ?, evaluated_at = ? WHERE id = ? AND status = 'pending'");
 
 // =====================================================
 // DISCORD CLIENT
@@ -530,7 +530,7 @@ client.on("interactionCreate", async interaction => {
             const token = interaction.customId.replace("setup_confirm_", "");
             const data = global.setupCache?.get(token);
             if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup นี้หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
-            if (data.userId !== interaction.user.id) return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
+            if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
             return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "เลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect()] });
         }
 
@@ -626,7 +626,7 @@ client.on("interactionCreate", async interaction => {
 
             if (!applicationId || Number.isNaN(applicationId)) return interaction.reply({ embeds: [errorEmbed("ข้อมูลไม่ถูกต้อง", "ไม่พบ ID ของใบสมัคร")], ephemeral: true });
             const application = getApplication.get(applicationId);
-            if (!application) return interaction.reply({ embeds: [errorEmbed("ไม่พบใบสมัคร", "ใบสมัครนี้ไม่มีอยู่ในระบบแล้ว")], ephemeral: true });
+            if (!application || application.guild_id !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่พบใบสมัคร", "ใบสมัครนี้ไม่มีอยู่ในระบบแล้ว")], ephemeral: true });
             if (application.status !== "pending") return interaction.reply({ embeds: [errorEmbed("ประเมินไปแล้ว", "ใบสมัครนี้ถูกประเมินไปแล้ว ไม่สามารถประเมินซ้ำได้")], ephemeral: true });
 
             const result = action === "pass" ? "passed" : "failed";
@@ -647,11 +647,14 @@ client.on("interactionCreate", async interaction => {
             }
 
             const application = getApplication.get(applicationId);
-            if (!application) return interaction.editReply({ embeds: [errorEmbed("ไม่พบใบสมัคร", "ไม่พบใบสมัครนี้ในฐานข้อมูล")] });
+            if (!application || application.guild_id !== interaction.guild.id) return interaction.editReply({ embeds: [errorEmbed("ไม่พบใบสมัคร", "ไม่พบใบสมัครนี้ในฐานข้อมูล")] });
             if (application.status !== "pending") return interaction.editReply({ embeds: [errorEmbed("ประเมินไปแล้ว", "ใบสมัครนี้ถูกประเมินไปแล้ว")] });
 
             const reason = interaction.fields.getTextInputValue("evaluation_reason");
-            evaluateApplication.run(result, interaction.user.id, interaction.user.tag, reason, Date.now(), applicationId);
+            const evalResult = evaluateApplication.run(result, interaction.user.id, interaction.user.tag, reason, Date.now(), applicationId);
+            if (evalResult.changes === 0) {
+                return interaction.editReply({ embeds: [errorEmbed("ประเมินไปแล้ว", "ใบสมัครนี้ถูกประเมินไปแล้ว")] });
+            }
             const updatedApplication = getApplication.get(applicationId);
             const channel = client.channels.cache.get(application.channel_id);
 
@@ -696,7 +699,7 @@ client.on("interactionCreate", async interaction => {
             console.error("Reply Error:", replyError);
         }
     }
-}); if
+});
 
 // =====================================================
 // GRACEFUL SHUTDOWN (สำหรับ Render)
