@@ -52,6 +52,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
     console.error("❌ ขาด Environment Variables ที่จำเป็น (DISCORD_TOKEN, CLIENT_ID, GUILD_ID)");
     process.exit(1);
 }
+console.log("[BOOT] Environment checked");
 
 // =====================================================
 // EXPRESS HTTP SERVER (HEALTH CHECK FOR RENDER)
@@ -70,7 +71,7 @@ app.get("/health", (req, res) => {
     res.status(200).json({ status: "ok", message: "Bot is running on Render" });
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`🌐 HTTP Server listening on port ${PORT}`);
     console.log("[BOOT] HTTP server started");
 });
@@ -89,7 +90,6 @@ const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
 console.log(`💾 เปิดฐานข้อมูล SQLite ที่: ${DB_PATH}`);
-console.log("[BOOT] Database initialized");
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -126,6 +126,8 @@ db.exec(`
         evaluated_at INTEGER
     )
 `);
+
+console.log("[BOOT] Database initialized");
 
 // =====================================================
 // DATABASE HELPERS & PREPARED STATEMENTS
@@ -396,7 +398,8 @@ async function registerCommands() {
 // =====================================================
 client.once("ready", async () => {
     console.log("====================================");
-    console.log(`[DISCORD] Ready as ${client.user.tag}`);
+    console.log(`[DISCORD] Bot is ready as ${client.user.tag}`);
+    console.log(`[DISCORD] Bot ID: ${client.user.id}`);
     console.log(`🤖 Bot: ${client.user.tag}`);
     console.log(`🆔 ID: ${client.user.id}`);
     console.log(`💻 Host: ${os.hostname()}`);
@@ -742,7 +745,7 @@ process.on("SIGTERM", () => shutdownGracefully("SIGTERM"));
 // =====================================================
 // LOGIN
 // =====================================================
-console.log("[DISCORD] Starting Discord login...");
+console.log("[BOOT] Starting Discord client login...");
 client.login(TOKEN)
     .then(() => {
         console.log("[DISCORD] Login successful");
