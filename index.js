@@ -54,6 +54,13 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 }
 console.log("[BOOT] Environment checked");
 
+// Declared here (not `const` further down) so the health-check route below
+// can always safely reference it — even if something later in boot (e.g. DB
+// init) throws before the real Client is constructed, this stays `null`
+// instead of causing a ReferenceError on every request, which would make
+// Render's health check fail forever with no useful log line.
+let client = null;
+
 // =====================================================
 // EXPRESS HTTP SERVER (HEALTH CHECK FOR RENDER)
 // =====================================================
@@ -62,7 +69,7 @@ const app = express();
 app.get("/", (req, res) => {
     res.status(200).json({
         status: "ok",
-        bot: client.isReady() ? "online" : "starting",
+        bot: client?.isReady() ? "online" : "starting",
         uptime: process.uptime()
     });
 });
@@ -76,22 +83,37 @@ const server = app.listen(PORT, "0.0.0.0", () => {
     console.log("[BOOT] HTTP server started");
 });
 
+server.on("error", (error) => {
+    console.error("❌ HTTP Server error (bind/port issue):", error?.message || error);
+});
+
 // =====================================================
 // DATABASE (SQLITE + BETTER-SQLITE3)
 // =====================================================
 // ตรวจสอบและสร้างโฟลเดอร์ Database อัตโนมัติ
-const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-    console.log(`📁 สร้างโฟลเดอร์สำหรับ Database อัตโนมัติ: ${dbDir}`);
+try {
+    const dbDir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dbDir)) {
+        fs.mkdirSync(dbDir, { recursive: true });
+        console.log(`📁 สร้างโฟลเดอร์สำหรับ Database อัตโนมัติ: ${dbDir}`);
+    }
+} catch (error) {
+    console.error(`❌ สร้างโฟลเดอร์ Database ไม่สำเร็จ (${DB_PATH}):`, error?.message || error);
+    process.exit(1);
 }
 
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
+let db;
+try {
+    db = new Database(DB_PATH);
+    db.pragma("journal_mode = WAL");
+    console.log(`💾 เปิดฐานข้อมูล SQLite ที่: ${DB_PATH}`);
+} catch (error) {
+    console.error(`❌ เปิดฐานข้อมูล SQLite ไม่สำเร็จ (${DB_PATH}):`, error?.message || error);
+    process.exit(1);
+}
 
-console.log(`💾 เปิดฐานข้อมูล SQLite ที่: ${DB_PATH}`);
-
-db.exec(`
+try {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
         guild_id TEXT PRIMARY KEY,
         evaluator_role_id TEXT,
@@ -105,7 +127,7 @@ db.exec(`
     )
 `);
 
-db.exec(`
+    db.exec(`
     CREATE TABLE IF NOT EXISTS applications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         guild_id TEXT NOT NULL,
@@ -127,7 +149,11 @@ db.exec(`
     )
 `);
 
-console.log("[BOOT] Database initialized");
+    console.log("[BOOT] Database initialized");
+} catch (error) {
+    console.error("❌ สร้างตารางฐานข้อมูลไม่สำเร็จ:", error?.message || error);
+    process.exit(1);
+}
 
 // =====================================================
 // DATABASE HELPERS & PREPARED STATEMENTS
@@ -167,7 +193,7 @@ const evaluateApplication = db.prepare("UPDATE applications SET status = ?, eval
 // =====================================================
 // DISCORD CLIENT
 // =====================================================
-const client = new Client({
+client = new Client({
     intents: [GatewayIntentBits.Guilds],
     partials: [Partials.Channel]
 });
@@ -238,7 +264,7 @@ function createApplicationEmbed(application) {
 
     const embed = new EmbedBuilder()
         .setColor(color)
-        .setTitle("มีใบสมัครทีมงาสส่งเข้ามาใหม่")
+        .setTitle("มีใบสมัครทีมงานส่งเข้ามาใหม่")
         .addFields(
             { name: "ผู้สมัคร", value: `<@${application.applicant_id}>\n\`${application.applicant_tag}\``, inline: false },
             { name: "ชื่อ และ อายุ", value: application.name_age || "-", inline: false },
