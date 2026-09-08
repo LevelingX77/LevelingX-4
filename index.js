@@ -15,13 +15,15 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
+    StringSelectMenuBuilder,
     RoleSelectMenuBuilder,
     ChannelSelectMenuBuilder,
     ChannelType,
     SlashCommandBuilder,
     REST,
     Routes,
-    PermissionsBitField
+    PermissionsBitField,
+    MessageFlags
 } = require("discord.js");
 
 // =====================================================
@@ -76,7 +78,6 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 // =====================================================
 const settingsStore = new Map();      // guild_id -> settings object
 const applicationsStore = new Map();  // id -> application object
-const setupCache = new Map();         // token -> pending /setup preview data
 let nextApplicationId = 1;
 
 const SETTINGS_COLUMNS = [
@@ -160,29 +161,6 @@ const evaluateApplication = {
 };
 
 // =====================================================
-// MEMORY CLEANUP (สำคัญสำหรับ Render Free ที่ RAM จำกัด)
-// =====================================================
-const APPLICATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // เก็บใบสมัครที่ประเมินแล้วไว้ 30 วัน
-
-function pruneOldApplications() {
-    const now = Date.now();
-    let removed = 0;
-    for (const [id, application] of applicationsStore) {
-        const isFinished = application.status !== "pending";
-        const referenceTime = application.evaluated_at || application.created_at;
-        if (isFinished && now - referenceTime > APPLICATION_RETENTION_MS) {
-            applicationsStore.delete(id);
-            removed++;
-        }
-    }
-    if (removed > 0) {
-        console.log(`[CLEANUP] ลบใบสมัครเก่าที่ประเมินแล้วออกจากหน่วยความจำ ${removed} รายการ`);
-    }
-}
-
-setInterval(pruneOldApplications, 6 * 60 * 60 * 1000); // รันทุก 6 ชั่วโมง
-
-// =====================================================
 // DISCORD CLIENT
 // =====================================================
 const client = new Client({
@@ -248,7 +226,7 @@ function createApplicationEmbed(application) {
 
     const embed = new EmbedBuilder()
         .setColor(color)
-        .setTitle("มีใบสมัครทีมงานส่งเข้ามาใหม่")
+        .setTitle("มีใบสมัครทีมงาสส่งเข้ามาใหม่")
         .addFields(
             { name: "ผู้สมัคร", value: `<@${application.applicant_id}>\n\`${application.applicant_tag}\``, inline: false },
             { name: "ชื่อ และ อายุ", value: application.name_age || "-", inline: false },
@@ -429,26 +407,26 @@ client.on("interactionCreate", async interaction => {
         if (interaction.isChatInputCommand()) {
             if (interaction.commandName === "set") {
                 if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
-                    return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คำสั่งนี้ใช้ได้เฉพาะเจ้าของเซิร์ฟเวอร์หรือผู้ที่มีสิทธิ์ Administrator เท่านั้น")], ephemeral: true });
+                    return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คำสั่งนี้ใช้ได้เฉพาะเจ้าของเซิร์ฟเวอร์หรือผู้ที่มีสิทธิ์ Administrator เท่านั้น")], flags: MessageFlags.Ephemeral });
                 }
                 const subcommand = interaction.options.getSubcommand();
                 if (subcommand === "role") {
                     return interaction.reply({
                         embeds: [infoEmbed("ตั้ง Role ผู้ประเมิน", "เลือก Role ที่สามารถกด **ผ่าน / ไม่ผ่าน** ใบสมัครได้จากเมนูด้านล่าง")],
-                        components: [createRoleSelect()], ephemeral: true
+                        components: [createRoleSelect()], flags: MessageFlags.Ephemeral
                     });
                 }
                 if (subcommand === "channel") {
                     return interaction.reply({
                         embeds: [infoEmbed("ตั้งค่าห้องระบบสมัคร", "เลือกห้องทั้ง 2 ห้องด้านล่าง\n\n**ห้องรับใบสมัคร** — ใบสมัครจากผู้สมัครจะถูกส่งเข้าห้องนี้\n\n**ห้องสำหรับแอดมินประเมิน** — ห้องที่แอดมินจะเห็นใบสมัครและกดปุ่ม ผ่าน / ไม่ผ่าน")],
-                        components: createChannelSettingsComponents(), ephemeral: true
+                        components: createChannelSettingsComponents(), flags: MessageFlags.Ephemeral
                     });
                 }
             }
 
             if (interaction.commandName === "setup") {
                 if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
-                    return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คำสั่งนี้ใช้ได้เฉพาะหัวดิส")], ephemeral: true });
+                    return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คำสั่งนี้ใช้ได้เฉพาะหัวดิส")], flags: MessageFlags.Ephemeral });
                 }
                 return interaction.showModal(createSetupModal());
             }
@@ -483,7 +461,7 @@ client.on("interactionCreate", async interaction => {
                 const embed = new EmbedBuilder().setColor(COLORS.MAIN).setTitle("คำสั่งระบบ").setDescription(
                     "`/setup`\nสร้าง Embed รับสมัครทีมงาน พร้อม Preview และเลือกห้องส่ง\n\n`/set role`\nตั้ง Role ที่สามารถประเมินใบสมัคร\n\n`/set channel`\nตั้งห้องรับใบสมัครและห้องสำหรับแอดมินประเมิน\n\n`/ping`\nแสดง Ping, CPU, RAM, Uptime และข้อมูล Host\n\n`/help`\nแสดงรายการคำสั่งทั้งหมด"
                 ).setTimestamp();
-                return interaction.reply({ embeds: [embed], ephemeral: true });
+                return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
             }
         }
 
@@ -491,9 +469,9 @@ client.on("interactionCreate", async interaction => {
             return interaction.showModal(createApplicationModal());
         }
 
-        if (interaction.isRoleSelect() && interaction.customId === "set_evaluator_role") {
+        if (interaction.isRoleSelectMenu() && interaction.customId === "set_evaluator_role") {
             if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
-                return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มีสิทธิ์ตั้งค่า Role")], ephemeral: true });
+                return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มีสิทธิ์ตั้งค่า Role")], flags: MessageFlags.Ephemeral });
             }
             const roleId = interaction.values[0];
             const role = interaction.guild.roles.cache.get(roleId);
@@ -504,20 +482,20 @@ client.on("interactionCreate", async interaction => {
 
         if (interaction.isChannelSelectMenu() && interaction.customId === "set_application_channel") {
             if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
-                return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มีสิทธิ์ตั้งค่าห้อง")], ephemeral: true });
+                return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มีสิทธิ์ตั้งค่าห้อง")], flags: MessageFlags.Ephemeral });
             }
             const channelId = interaction.values[0];
             setSetting(interaction.guild.id, "application_channel_id", channelId);
-            return interaction.reply({ embeds: [successEmbed("ตั้งห้องรับใบสมัครสำเร็จ", `ใบสมัครจะถูกส่งไปที่ <#${channelId}>`)], ephemeral: true });
+            return interaction.reply({ embeds: [successEmbed("ตั้งห้องรับใบสมัครสำเร็จ", `ใบสมัครจะถูกส่งไปที่ <#${channelId}>`)], flags: MessageFlags.Ephemeral });
         }
 
         if (interaction.isChannelSelectMenu() && interaction.customId === "set_review_channel") {
             if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
-                return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มีสิทธิ์ตั้งค่าห้อง")], ephemeral: true });
+                return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มีสิทธิ์ตั้งค่าห้อง")], flags: MessageFlags.Ephemeral });
             }
             const channelId = interaction.values[0];
             setSetting(interaction.guild.id, "review_channel_id", channelId);
-            return interaction.reply({ embeds: [successEmbed("ตั้งห้องประเมินสำเร็จ", `ใบสมัครสำหรับแอดมินจะอยู่ที่ <#${channelId}>`)], ephemeral: true });
+            return interaction.reply({ embeds: [successEmbed("ตั้งห้องประเมินสำเร็จ", `ใบสมัครสำหรับแอดมินจะอยู่ที่ <#${channelId}>`)], flags: MessageFlags.Ephemeral });
         }
 
         if (interaction.isModalSubmit() && interaction.customId === "setup_modal") {
@@ -528,11 +506,11 @@ client.on("interactionCreate", async interaction => {
             let color = interaction.fields.getTextInputValue("setup_color") || "#5865F2";
 
             if (!/^#?[0-9A-Fa-f]{6}$/.test(color)) {
-                return interaction.reply({ embeds: [errorEmbed("สีไม่ถูกต้อง", "กรุณาใช้รูปแบบ เช่น `#5865F2` หรือ `5865F2`")], ephemeral: true });
+                return interaction.reply({ embeds: [errorEmbed("สีไม่ถูกต้อง", "กรุณาใช้รูปแบบ เช่น `#5865F2` หรือ `5865F2`")], flags: MessageFlags.Ephemeral });
             }
             if (!color.startsWith("#")) color = "#" + color;
             if (image) {
-                try { new URL(image); } catch { return interaction.reply({ embeds: [errorEmbed("Image URL ไม่ถูกต้อง", "กรุณาใส่ URL รูปภาพที่ถูกต้อง")], ephemeral: true }); }
+                try { new URL(image); } catch { return interaction.reply({ embeds: [errorEmbed("Image URL ไม่ถูกต้อง", "กรุณาใส่ URL รูปภาพที่ถูกต้อง")], flags: MessageFlags.Ephemeral }); }
             }
 
             const previewEmbed = new EmbedBuilder().setColor(color);
@@ -543,8 +521,9 @@ client.on("interactionCreate", async interaction => {
             previewEmbed.setTimestamp();
 
             const token = `${Date.now()}_${interaction.user.id}`;
-            setupCache.set(token, { guildId: interaction.guild.id, userId: interaction.user.id, title, description, image, footer, color });
-            setTimeout(() => { setupCache.delete(token); }, 10 * 60 * 1000);
+            global.setupCache = global.setupCache || new Map();
+            global.setupCache.set(token, { guildId: interaction.guild.id, userId: interaction.user.id, title, description, image, footer, color });
+            setTimeout(() => { global.setupCache?.delete(token); }, 10 * 60 * 1000);
 
             const confirmButton = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`setup_confirm_${token}`).setLabel("ตกลงและเลือกห้อง").setEmoji("💾").setStyle(ButtonStyle.Success),
@@ -553,53 +532,28 @@ client.on("interactionCreate", async interaction => {
 
             return interaction.reply({
                 embeds: [infoEmbed("ตัวอย่าง Embed", "ตรวจสอบตัวอย่างด้านล่าง\n\nถ้าพอใจ ให้กด **ตกลงและเลือกห้อง**"), previewEmbed],
-                components: [confirmButton], ephemeral: true
+                components: [confirmButton], flags: MessageFlags.Ephemeral
             });
         }
 
         if (interaction.isButton() && interaction.customId.startsWith("setup_confirm_")) {
             const token = interaction.customId.replace("setup_confirm_", "");
-            const data = setupCache.get(token);
+            const data = global.setupCache?.get(token);
             if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup นี้หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
-            if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
-
-            // ถ้าตั้ง "ห้องรับใบสมัคร" ไว้แล้วด้วย /set channel ให้ส่งไปห้องนั้นทันทีโดยไม่ต้องเลือกซ้ำ
-            const settings = getSettings(interaction.guild.id);
-            const presetChannel = settings.application_channel_id
-                ? interaction.guild.channels.cache.get(settings.application_channel_id)
-                : null;
-
-            if (presetChannel) {
-                setSetting(interaction.guild.id, "setup_title", data.title);
-                setSetting(interaction.guild.id, "setup_description", data.description);
-                setSetting(interaction.guild.id, "setup_image", data.image);
-                setSetting(interaction.guild.id, "setup_footer", data.footer);
-                setSetting(interaction.guild.id, "setup_color", data.color);
-
-                try {
-                    await presetChannel.send({ embeds: [createRecruitmentEmbed(getSettings(interaction.guild.id))], components: [createRecruitmentButton()] });
-                } catch (error) {
-                    console.error(error);
-                    return interaction.update({ embeds: [errorEmbed("ส่ง Embed ไม่สำเร็จ", "บอทไม่มีสิทธิ์ส่งข้อความในห้องที่ตั้งไว้ด้วย `/set channel` หรือเกิดข้อผิดพลาด")], components: [] });
-                }
-
-                setupCache.delete(token);
-                return interaction.update({ embeds: [successEmbed("Setup สำเร็จ", `ส่ง Embed รับสมัครไปที่ ${presetChannel} เรียบร้อยแล้ว`)], components: [] });
-            }
-
-            return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "ยังไม่ได้ตั้งห้องด้วย `/set channel` (หรือหาห้องที่ตั้งไว้ไม่พบ) กรุณาเลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect()] });
+            if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], flags: MessageFlags.Ephemeral });
+            return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "เลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect()] });
         }
 
         if (interaction.isButton() && interaction.customId.startsWith("setup_cancel_")) {
             const token = interaction.customId.replace("setup_cancel_", "");
-            setupCache.delete(token);
+            global.setupCache?.delete(token);
             return interaction.update({ embeds: [infoEmbed("ยกเลิกแล้ว", "ไม่ได้บันทึก Embed นี้")], components: [] });
         }
 
         if (interaction.isChannelSelectMenu() && interaction.customId === "setup_send_channel") {
             let data = null;
             let token = null;
-            for (const [key, value] of setupCache) {
+            for (const [key, value] of (global.setupCache || new Map())) {
                 if (value.userId === interaction.user.id && value.guildId === interaction.guild.id) {
                     data = value;
                     token = key;
@@ -625,12 +579,12 @@ client.on("interactionCreate", async interaction => {
                 return interaction.update({ embeds: [errorEmbed("ส่ง Embed ไม่สำเร็จ", "บอทไม่มีสิทธิ์ส่งข้อความในห้องที่เลือก หรือเกิดข้อผิดพลาด")], components: [] });
             }
 
-            setupCache.delete(token);
+            global.setupCache?.delete(token);
             return interaction.update({ embeds: [successEmbed("Setup สำเร็จ", `ส่ง Embed รับสมัครไปที่ ${channel} เรียบร้อยแล้ว`)], components: [] });
         }
 
         if (interaction.isModalSubmit() && interaction.customId === "application_modal") {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             const settings = getSettings(interaction.guild.id);
 
             if (!settings.review_channel_id) {
@@ -673,24 +627,24 @@ client.on("interactionCreate", async interaction => {
 
         if (interaction.isButton() && (interaction.customId.startsWith("application_pass_") || interaction.customId.startsWith("application_fail_"))) {
             const settings = getSettings(interaction.guild.id);
-            if (!settings.evaluator_role_id) return interaction.reply({ embeds: [errorEmbed("ยังไม่ได้ตั้ง Role", "หัวดิสต้องใช้ `/set role` ก่อน")], ephemeral: true });
-            if (!interaction.member.roles.cache.has(settings.evaluator_role_id)) return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มี Role ที่สามารถประเมินใบสมัครได้")], ephemeral: true });
+            if (!settings.evaluator_role_id) return interaction.reply({ embeds: [errorEmbed("ยังไม่ได้ตั้ง Role", "หัวดิสต้องใช้ `/set role` ก่อน")], flags: MessageFlags.Ephemeral });
+            if (!interaction.member.roles.cache.has(settings.evaluator_role_id)) return interaction.reply({ embeds: [errorEmbed("ไม่มีสิทธิ์", "คุณไม่มี Role ที่สามารถประเมินใบสมัครได้")], flags: MessageFlags.Ephemeral });
 
             const parts = interaction.customId.split("_");
             const action = parts[1];
             const applicationId = Number(parts[2]);
 
-            if (!applicationId || Number.isNaN(applicationId)) return interaction.reply({ embeds: [errorEmbed("ข้อมูลไม่ถูกต้อง", "ไม่พบ ID ของใบสมัคร")], ephemeral: true });
+            if (!applicationId || Number.isNaN(applicationId)) return interaction.reply({ embeds: [errorEmbed("ข้อมูลไม่ถูกต้อง", "ไม่พบ ID ของใบสมัคร")], flags: MessageFlags.Ephemeral });
             const application = getApplication.get(applicationId);
-            if (!application || application.guild_id !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่พบใบสมัคร", "ใบสมัครนี้ไม่มีอยู่ในระบบแล้ว")], ephemeral: true });
-            if (application.status !== "pending") return interaction.reply({ embeds: [errorEmbed("ประเมินไปแล้ว", "ใบสมัครนี้ถูกประเมินไปแล้ว ไม่สามารถประเมินซ้ำได้")], ephemeral: true });
+            if (!application || application.guild_id !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่พบใบสมัคร", "ใบสมัครนี้ไม่มีอยู่ในระบบแล้ว")], flags: MessageFlags.Ephemeral });
+            if (application.status !== "pending") return interaction.reply({ embeds: [errorEmbed("ประเมินไปแล้ว", "ใบสมัครนี้ถูกประเมินไปแล้ว ไม่สามารถประเมินซ้ำได้")], flags: MessageFlags.Ephemeral });
 
             const result = action === "pass" ? "passed" : "failed";
             return interaction.showModal(createEvaluationModal(applicationId, result));
         }
 
         if (interaction.isModalSubmit() && interaction.customId.startsWith("evaluation_modal_")) {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             const parts = interaction.customId.split("_");
             const result = parts[2];
             const applicationId = Number(parts[3]);
@@ -749,7 +703,7 @@ client.on("interactionCreate", async interaction => {
             if (interaction.deferred) {
                 await interaction.editReply({ embeds: [errorEmbed("เกิดข้อผิดพลาด", "เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่อีกครั้ง")] });
             } else if (!interaction.replied) {
-                await interaction.reply({ embeds: [errorEmbed("เกิดข้อผิดพลาด", "เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่อีกครั้ง")], ephemeral: true });
+                await interaction.reply({ embeds: [errorEmbed("เกิดข้อผิดพลาด", "เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่อีกครั้ง")], flags: MessageFlags.Ephemeral });
             }
         } catch (replyError) {
             console.error("Reply Error:", replyError);
@@ -762,29 +716,17 @@ client.on("interactionCreate", async interaction => {
 // =====================================================
 function shutdownGracefully(signal) {
     console.log(`\n⚠️ ได้รับสัญญาณ ${signal}. กำลังปิดระบบอย่างปลอดภัย...`);
-
-    let exited = false;
-    const exitOnce = (code) => {
-        if (exited) return;
-        exited = true;
-        process.exit(code);
-    };
+    
+    server.close(() => {
+        console.log("✅ ปิด HTTP Server สำเร็จ");
+    });
 
     if (client) {
         client.destroy();
         console.log("✅ Disconnect Discord Client สำเร็จ");
     }
 
-    server.close(() => {
-        console.log("✅ ปิด HTTP Server สำเร็จ");
-        exitOnce(0);
-    });
-
-    // กันไว้เผื่อ server.close() ค้าง (เช่น มี connection ค้างอยู่) จะได้ไม่แฮงก์ตอน deploy ใหม่บน Render
-    setTimeout(() => {
-        console.warn("⚠️ ปิด HTTP Server ไม่ทันเวลา บังคับออกจากโปรแกรม");
-        exitOnce(1);
-    }, 5000).unref();
+    process.exit(0);
 }
 
 process.on("SIGINT", () => shutdownGracefully("SIGINT"));
