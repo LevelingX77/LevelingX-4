@@ -2,10 +2,7 @@ require("dotenv").config();
 console.log("[BOOT] Starting application");
 
 const os = require("os");
-const fs = require("fs");
-const path = require("path");
 const express = require("express");
-const Database = require("better-sqlite3");
 
 const {
     Client,
@@ -18,7 +15,6 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
-    StringSelectMenuBuilder,
     RoleSelectMenuBuilder,
     ChannelSelectMenuBuilder,
     ChannelType,
@@ -46,20 +42,12 @@ const TOKEN = process.env.DISCORD_TOKEN?.trim();
 const CLIENT_ID = process.env.CLIENT_ID?.trim();
 const GUILD_ID = process.env.GUILD_ID?.trim();
 const PORT = process.env.PORT || 3000;
-const DB_PATH = process.env.DATABASE_PATH || "./data/bot.db";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
     console.error("❌ ขาด Environment Variables ที่จำเป็น (DISCORD_TOKEN, CLIENT_ID, GUILD_ID)");
     process.exit(1);
 }
 console.log("[BOOT] Environment checked");
-
-// Declared here (not `const` further down) so the health-check route below
-// can always safely reference it — even if something later in boot (e.g. DB
-// init) throws before the real Client is constructed, this stays `null`
-// instead of causing a ReferenceError on every request, which would make
-// Render's health check fail forever with no useful log line.
-let client = null;
 
 // =====================================================
 // EXPRESS HTTP SERVER (HEALTH CHECK FOR RENDER)
@@ -69,7 +57,7 @@ const app = express();
 app.get("/", (req, res) => {
     res.status(200).json({
         status: "ok",
-        bot: client?.isReady() ? "online" : "starting",
+        bot: client.isReady() ? "online" : "starting",
         uptime: process.uptime()
     });
 });
@@ -83,117 +71,121 @@ const server = app.listen(PORT, "0.0.0.0", () => {
     console.log("[BOOT] HTTP server started");
 });
 
-server.on("error", (error) => {
-    console.error("❌ HTTP Server error (bind/port issue):", error?.message || error);
-});
+// =====================================================
+// IN-MEMORY DATA STORE (ไม่ใช้ Database — ข้อมูลจะหายเมื่อรีสตาร์ทบอท)
+// =====================================================
+const settingsStore = new Map();      // guild_id -> settings object
+const applicationsStore = new Map();  // id -> application object
+const setupCache = new Map();         // token -> pending /setup preview data
+let nextApplicationId = 1;
+
+const SETTINGS_COLUMNS = [
+    "evaluator_role_id", "application_channel_id", "review_channel_id",
+    "setup_title", "setup_description", "setup_image", "setup_footer", "setup_color"
+];
+
+console.log("[BOOT] In-memory data store initialized (no database)");
 
 // =====================================================
-// DATABASE (SQLITE + BETTER-SQLITE3)
-// =====================================================
-// ตรวจสอบและสร้างโฟลเดอร์ Database อัตโนมัติ
-try {
-    const dbDir = path.dirname(DB_PATH);
-    if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
-        console.log(`📁 สร้างโฟลเดอร์สำหรับ Database อัตโนมัติ: ${dbDir}`);
-    }
-} catch (error) {
-    console.error(`❌ สร้างโฟลเดอร์ Database ไม่สำเร็จ (${DB_PATH}):`, error?.message || error);
-    process.exit(1);
-}
-
-let db;
-try {
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    console.log(`💾 เปิดฐานข้อมูล SQLite ที่: ${DB_PATH}`);
-} catch (error) {
-    console.error(`❌ เปิดฐานข้อมูล SQLite ไม่สำเร็จ (${DB_PATH}):`, error?.message || error);
-    process.exit(1);
-}
-
-try {
-    db.exec(`
-    CREATE TABLE IF NOT EXISTS settings (
-        guild_id TEXT PRIMARY KEY,
-        evaluator_role_id TEXT,
-        application_channel_id TEXT,
-        review_channel_id TEXT,
-        setup_title TEXT,
-        setup_description TEXT,
-        setup_image TEXT,
-        setup_footer TEXT,
-        setup_color TEXT
-    )
-`);
-
-    db.exec(`
-    CREATE TABLE IF NOT EXISTS applications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        guild_id TEXT NOT NULL,
-        applicant_id TEXT NOT NULL,
-        applicant_tag TEXT NOT NULL,
-        name_age TEXT NOT NULL,
-        mbti_position TEXT NOT NULL,
-        work_time TEXT NOT NULL,
-        experience TEXT NOT NULL,
-        additional_info TEXT,
-        status TEXT NOT NULL DEFAULT 'pending',
-        evaluator_id TEXT,
-        evaluator_tag TEXT,
-        reason TEXT,
-        message_id TEXT,
-        channel_id TEXT,
-        created_at INTEGER NOT NULL,
-        evaluated_at INTEGER
-    )
-`);
-
-    console.log("[BOOT] Database initialized");
-} catch (error) {
-    console.error("❌ สร้างตารางฐานข้อมูลไม่สำเร็จ:", error?.message || error);
-    process.exit(1);
-}
-
-// =====================================================
-// DATABASE HELPERS & PREPARED STATEMENTS
+// DATA HELPERS (IN-MEMORY)
 // =====================================================
 function getSettings(guildId) {
-    let settings = db.prepare("SELECT * FROM settings WHERE guild_id = ?").get(guildId);
-    if (!settings) {
-        db.prepare("INSERT INTO settings (guild_id) VALUES (?)").run(guildId);
-        settings = db.prepare("SELECT * FROM settings WHERE guild_id = ?").get(guildId);
+    if (!settingsStore.has(guildId)) {
+        const defaults = { guild_id: guildId };
+        for (const column of SETTINGS_COLUMNS) defaults[column] = null;
+        settingsStore.set(guildId, defaults);
     }
-    return settings;
+    return settingsStore.get(guildId);
 }
 
 function setSetting(guildId, column, value) {
-    const allowedColumns = [
-        "evaluator_role_id", "application_channel_id", "review_channel_id",
-        "setup_title", "setup_description", "setup_image", "setup_footer", "setup_color"
-    ];
-    if (!allowedColumns.includes(column)) throw new Error("Invalid settings column");
-    getSettings(guildId);
-    db.prepare(`UPDATE settings SET ${column} = ? WHERE guild_id = ?`).run(value, guildId);
+    if (!SETTINGS_COLUMNS.includes(column)) throw new Error("Invalid settings column");
+    const settings = getSettings(guildId);
+    settings[column] = value;
 }
 
-const insertApplication = db.prepare(`
-    INSERT INTO applications (
-        guild_id, applicant_id, applicant_tag, name_age, mbti_position, 
-        work_time, experience, additional_info, status, created_at
-    ) VALUES (
-        @guild_id, @applicant_id, @applicant_tag, @name_age, @mbti_position, 
-        @work_time, @experience, @additional_info, 'pending', @created_at
-    )
-`);
-const getApplication = db.prepare("SELECT * FROM applications WHERE id = ?");
-const setApplicationMessage = db.prepare("UPDATE applications SET message_id = ?, channel_id = ? WHERE id = ?");
-const evaluateApplication = db.prepare("UPDATE applications SET status = ?, evaluator_id = ?, evaluator_tag = ?, reason = ?, evaluated_at = ? WHERE id = ? AND status = 'pending'");
+const insertApplication = {
+    run(data) {
+        const id = nextApplicationId++;
+        applicationsStore.set(id, {
+            id,
+            guild_id: data.guild_id,
+            applicant_id: data.applicant_id,
+            applicant_tag: data.applicant_tag,
+            name_age: data.name_age,
+            mbti_position: data.mbti_position,
+            work_time: data.work_time,
+            experience: data.experience,
+            additional_info: data.additional_info || "",
+            status: "pending",
+            evaluator_id: null,
+            evaluator_tag: null,
+            reason: null,
+            message_id: null,
+            channel_id: null,
+            created_at: data.created_at,
+            evaluated_at: null
+        });
+        return { lastInsertRowid: id };
+    }
+};
+
+const getApplication = {
+    get(id) {
+        return applicationsStore.get(Number(id));
+    }
+};
+
+const setApplicationMessage = {
+    run(messageId, channelId, applicationId) {
+        const application = applicationsStore.get(Number(applicationId));
+        if (!application) return { changes: 0 };
+        application.message_id = messageId;
+        application.channel_id = channelId;
+        return { changes: 1 };
+    }
+};
+
+const evaluateApplication = {
+    run(status, evaluatorId, evaluatorTag, reason, evaluatedAt, applicationId) {
+        const application = applicationsStore.get(Number(applicationId));
+        if (!application || application.status !== "pending") return { changes: 0 };
+        application.status = status;
+        application.evaluator_id = evaluatorId;
+        application.evaluator_tag = evaluatorTag;
+        application.reason = reason;
+        application.evaluated_at = evaluatedAt;
+        return { changes: 1 };
+    }
+};
+
+// =====================================================
+// MEMORY CLEANUP (สำคัญสำหรับ Render Free ที่ RAM จำกัด)
+// =====================================================
+const APPLICATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // เก็บใบสมัครที่ประเมินแล้วไว้ 30 วัน
+
+function pruneOldApplications() {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, application] of applicationsStore) {
+        const isFinished = application.status !== "pending";
+        const referenceTime = application.evaluated_at || application.created_at;
+        if (isFinished && now - referenceTime > APPLICATION_RETENTION_MS) {
+            applicationsStore.delete(id);
+            removed++;
+        }
+    }
+    if (removed > 0) {
+        console.log(`[CLEANUP] ลบใบสมัครเก่าที่ประเมินแล้วออกจากหน่วยความจำ ${removed} รายการ`);
+    }
+}
+
+setInterval(pruneOldApplications, 6 * 60 * 60 * 1000); // รันทุก 6 ชั่วโมง
 
 // =====================================================
 // DISCORD CLIENT
 // =====================================================
-client = new Client({
+const client = new Client({
     intents: [GatewayIntentBits.Guilds],
     partials: [Partials.Channel]
 });
@@ -223,14 +215,6 @@ function errorEmbed(title, description) {
 
 function infoEmbed(title, description) {
     return new EmbedBuilder().setColor(COLORS.MAIN).setTitle(title).setDescription(description).setTimestamp();
-}
-
-// Discord caps a single embed field value at 1024 characters. Modal inputs
-// allow up to 4000, so long answers must be truncated before being placed
-// into an embed field or the send() call throws.
-function truncateForEmbed(text, max = 1024) {
-    if (!text) return text;
-    return text.length > max ? text.slice(0, max - 3) + "..." : text;
 }
 
 // =====================================================
@@ -270,8 +254,8 @@ function createApplicationEmbed(application) {
             { name: "ชื่อ และ อายุ", value: application.name_age || "-", inline: false },
             { name: "ตำแหน่ง", value: application.mbti_position || "-", inline: false },
             { name: "เวลาว่าง", value: application.work_time || "-", inline: false },
-            { name: "ประสบการณ์", value: truncateForEmbed(application.experience) || "-", inline: false },
-            { name: "ข้อมูลเพิ่มเติม", value: truncateForEmbed(application.additional_info) || "ไม่มีข้อมูลเพิ่มเติม", inline: false },
+            { name: "ประสบการณ์", value: application.experience || "-", inline: false },
+            { name: "ข้อมูลเพิ่มเติม", value: application.additional_info || "ไม่มีข้อมูลเพิ่มเติม", inline: false },
             { name: "ผลการประเมิน", value: status, inline: false }
         );
 
@@ -341,9 +325,9 @@ function createSetupModal() {
     return modal;
 }
 
-function createSetupChannelSelect(token) {
+function createSetupChannelSelect() {
     return new ActionRowBuilder().addComponents(
-        new ChannelSelectMenuBuilder().setCustomId(`setup_send_channel_${token}`).setPlaceholder("เลือกห้องที่จะส่ง Embed รับสมัคร").setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(1).setMaxValues(1)
+        new ChannelSelectMenuBuilder().setCustomId("setup_send_channel").setPlaceholder("เลือกห้องที่จะส่ง Embed รับสมัคร").setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setMinValues(1).setMaxValues(1)
     );
 }
 
@@ -412,8 +396,7 @@ const commands = [
         .addSubcommand(sub => sub.setName("channel").setDescription("ตั้งค่าห้องของระบบสมัคร")),
     new SlashCommandBuilder().setName("setup").setDescription("สร้าง Embed รับสมัครทีมงาน"),
     new SlashCommandBuilder().setName("ping").setDescription("ดู Ping และข้อมูล Host"),
-    new SlashCommandBuilder().setName("help").setDescription("ดูวิธีใช้คำสั่งทั้งหมด"),
-    new SlashCommandBuilder().setName("hlep").setDescription("ดูวิธีใช้คำสั่งทั้งหมด")
+    new SlashCommandBuilder().setName("help").setDescription("ดูวิธีใช้คำสั่งทั้งหมด")
 ].map(command => command.toJSON());
 
 async function registerCommands() {
@@ -485,7 +468,7 @@ client.on("interactionCreate", async interaction => {
 
                 const embed = new EmbedBuilder().setColor(COLORS.MAIN).setTitle(" Bot System Status")
                     .addFields(
-                        { name: "Discord Ping", value: `\`${discordPing}ms\``, inline: true },
+                        { name: "Ping", value: `\`${discordPing}ms\``, inline: true },
                         { name: "CPU", value: `${cpuUsage.toFixed(2)}%\n${cpuCores} Cores`, inline: true },
                         { name: "Host RAM", value: `${formatBytes(usedMemory)} / ${formatBytes(totalMemory)}\nFree: ${formatBytes(freeMemory)}`, inline: true },
                         { name: "Bot RAM", value: `RSS: ${formatBytes(botMemory.rss)}\nHeap: ${formatBytes(botMemory.heapUsed)}`, inline: true },
@@ -496,7 +479,7 @@ client.on("interactionCreate", async interaction => {
                 return interaction.editReply({ embeds: [embed] });
             }
 
-            if (interaction.commandName === "help" || interaction.commandName === "hlep") {
+            if (interaction.commandName === "help") {
                 const embed = new EmbedBuilder().setColor(COLORS.MAIN).setTitle("คำสั่งระบบ").setDescription(
                     "`/setup`\nสร้าง Embed รับสมัครทีมงาน พร้อม Preview และเลือกห้องส่ง\n\n`/set role`\nตั้ง Role ที่สามารถประเมินใบสมัคร\n\n`/set channel`\nตั้งห้องรับใบสมัครและห้องสำหรับแอดมินประเมิน\n\n`/ping`\nแสดง Ping, CPU, RAM, Uptime และข้อมูล Host\n\n`/help`\nแสดงรายการคำสั่งทั้งหมด"
                 ).setTimestamp();
@@ -560,9 +543,8 @@ client.on("interactionCreate", async interaction => {
             previewEmbed.setTimestamp();
 
             const token = `${Date.now()}_${interaction.user.id}`;
-            global.setupCache = global.setupCache || new Map();
-            global.setupCache.set(token, { guildId: interaction.guild.id, userId: interaction.user.id, title, description, image, footer, color });
-            setTimeout(() => { global.setupCache?.delete(token); }, 10 * 60 * 1000);
+            setupCache.set(token, { guildId: interaction.guild.id, userId: interaction.user.id, title, description, image, footer, color });
+            setTimeout(() => { setupCache.delete(token); }, 10 * 60 * 1000);
 
             const confirmButton = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`setup_confirm_${token}`).setLabel("ตกลงและเลือกห้อง").setEmoji("💾").setStyle(ButtonStyle.Success),
@@ -577,25 +559,53 @@ client.on("interactionCreate", async interaction => {
 
         if (interaction.isButton() && interaction.customId.startsWith("setup_confirm_")) {
             const token = interaction.customId.replace("setup_confirm_", "");
-            const data = global.setupCache?.get(token);
+            const data = setupCache.get(token);
             if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup นี้หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
             if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
-            return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "เลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect(token)] });
+
+            // ถ้าตั้ง "ห้องรับใบสมัคร" ไว้แล้วด้วย /set channel ให้ส่งไปห้องนั้นทันทีโดยไม่ต้องเลือกซ้ำ
+            const settings = getSettings(interaction.guild.id);
+            const presetChannel = settings.application_channel_id
+                ? interaction.guild.channels.cache.get(settings.application_channel_id)
+                : null;
+
+            if (presetChannel) {
+                setSetting(interaction.guild.id, "setup_title", data.title);
+                setSetting(interaction.guild.id, "setup_description", data.description);
+                setSetting(interaction.guild.id, "setup_image", data.image);
+                setSetting(interaction.guild.id, "setup_footer", data.footer);
+                setSetting(interaction.guild.id, "setup_color", data.color);
+
+                try {
+                    await presetChannel.send({ embeds: [createRecruitmentEmbed(getSettings(interaction.guild.id))], components: [createRecruitmentButton()] });
+                } catch (error) {
+                    console.error(error);
+                    return interaction.update({ embeds: [errorEmbed("ส่ง Embed ไม่สำเร็จ", "บอทไม่มีสิทธิ์ส่งข้อความในห้องที่ตั้งไว้ด้วย `/set channel` หรือเกิดข้อผิดพลาด")], components: [] });
+                }
+
+                setupCache.delete(token);
+                return interaction.update({ embeds: [successEmbed("Setup สำเร็จ", `ส่ง Embed รับสมัครไปที่ ${presetChannel} เรียบร้อยแล้ว`)], components: [] });
+            }
+
+            return interaction.update({ embeds: [infoEmbed("เลือกห้อง", "ยังไม่ได้ตั้งห้องด้วย `/set channel` (หรือหาห้องที่ตั้งไว้ไม่พบ) กรุณาเลือกห้องที่ต้องการให้บอทส่ง Embed รับสมัครไป")], components: [createSetupChannelSelect()] });
         }
 
         if (interaction.isButton() && interaction.customId.startsWith("setup_cancel_")) {
             const token = interaction.customId.replace("setup_cancel_", "");
-            global.setupCache?.delete(token);
+            setupCache.delete(token);
             return interaction.update({ embeds: [infoEmbed("ยกเลิกแล้ว", "ไม่ได้บันทึก Embed นี้")], components: [] });
         }
 
-        if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("setup_send_channel_")) {
-            const token = interaction.customId.replace("setup_send_channel_", "");
-            const data = global.setupCache?.get(token);
-            if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
-            if (data.userId !== interaction.user.id || data.guildId !== interaction.guild.id) {
-                return interaction.reply({ embeds: [errorEmbed("ไม่ใช่ผู้หัวดิส", "เฉพาะคนที่สร้าง Setup นี้เท่านั้นที่สามารถบันทึกได้")], ephemeral: true });
+        if (interaction.isChannelSelectMenu() && interaction.customId === "setup_send_channel") {
+            let data = null;
+            let token = null;
+            for (const [key, value] of setupCache) {
+                if (value.userId === interaction.user.id && value.guildId === interaction.guild.id) {
+                    data = value;
+                    token = key;
+                }
             }
+            if (!data) return interaction.update({ embeds: [errorEmbed("หมดเวลา", "ข้อมูล Setup หมดอายุแล้ว กรุณาใช้ `/setup` ใหม่")], components: [] });
 
             const channelId = interaction.values[0];
             const channel = interaction.guild.channels.cache.get(channelId);
@@ -615,7 +625,7 @@ client.on("interactionCreate", async interaction => {
                 return interaction.update({ embeds: [errorEmbed("ส่ง Embed ไม่สำเร็จ", "บอทไม่มีสิทธิ์ส่งข้อความในห้องที่เลือก หรือเกิดข้อผิดพลาด")], components: [] });
             }
 
-            global.setupCache?.delete(token);
+            setupCache.delete(token);
             return interaction.update({ embeds: [successEmbed("Setup สำเร็จ", `ส่ง Embed รับสมัครไปที่ ${channel} เรียบร้อยแล้ว`)], components: [] });
         }
 
@@ -752,22 +762,29 @@ client.on("interactionCreate", async interaction => {
 // =====================================================
 function shutdownGracefully(signal) {
     console.log(`\n⚠️ ได้รับสัญญาณ ${signal}. กำลังปิดระบบอย่างปลอดภัย...`);
-    
-    server.close(() => {
-        console.log("✅ ปิด HTTP Server สำเร็จ");
-    });
+
+    let exited = false;
+    const exitOnce = (code) => {
+        if (exited) return;
+        exited = true;
+        process.exit(code);
+    };
 
     if (client) {
         client.destroy();
         console.log("✅ Disconnect Discord Client สำเร็จ");
     }
 
-    if (db) {
-        db.close();
-        console.log("✅ ปิดการเชื่อมต่อ SQLite สำเร็จ");
-    }
+    server.close(() => {
+        console.log("✅ ปิด HTTP Server สำเร็จ");
+        exitOnce(0);
+    });
 
-    process.exit(0);
+    // กันไว้เผื่อ server.close() ค้าง (เช่น มี connection ค้างอยู่) จะได้ไม่แฮงก์ตอน deploy ใหม่บน Render
+    setTimeout(() => {
+        console.warn("⚠️ ปิด HTTP Server ไม่ทันเวลา บังคับออกจากโปรแกรม");
+        exitOnce(1);
+    }, 5000).unref();
 }
 
 process.on("SIGINT", () => shutdownGracefully("SIGINT"));
